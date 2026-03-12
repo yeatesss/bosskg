@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -26,6 +28,7 @@ type Client struct {
 	restyClient *resty.Client
 	requestID   func() string
 	userAgent   string
+	debug       bool
 }
 
 type Config struct {
@@ -53,6 +56,12 @@ func WithRequestIDFunc(f func() string) Option {
 func WithUserAgent(ua string) Option {
 	return func(c *Client) {
 		c.userAgent = ua
+	}
+}
+
+func WithDebug(debug bool) Option {
+	return func(c *Client) {
+		c.debug = debug
 	}
 }
 
@@ -120,6 +129,10 @@ func (c *Client) Do(ctx context.Context, funCode FunCode, req any, out any) (*Re
 		return nil, fmt.Errorf("marshal reqData: %w", err)
 	}
 
+	if c.debug {
+		log.Printf("[bosskg-debug] >>> ReqData (plain): %s", string(reqBodyPlain))
+	}
+
 	reqDataCipherB64, err := EncryptDESBase64(reqBodyPlain, c.desKey)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt reqData: %w", err)
@@ -139,9 +152,17 @@ func (c *Client) Do(ctx context.Context, funCode FunCode, req any, out any) (*Re
 		Sign:    sign,
 	}
 
-	rawResp, err := c.post(ctx, msg)
+	resp, err := c.post(ctx, msg)
 	if err != nil {
 		return nil, err
+	}
+
+	rawResp := resp.Body()
+
+	if c.debug {
+		log.Printf("[bosskg-debug] <<< Response Status: %d", resp.StatusCode())
+		log.Printf("[bosskg-debug] <<< Response Headers: %v", resp.Header())
+		log.Printf("[bosskg-debug] <<< Response Body (raw): %s", string(rawResp))
 	}
 
 	var respMsg RespMessage
@@ -163,6 +184,10 @@ func (c *Client) Do(ctx context.Context, funCode FunCode, req any, out any) (*Re
 			return nil, fmt.Errorf("decrypt resData: %w", err)
 		}
 		respMsg.ResData = string(plain)
+
+		if c.debug {
+			log.Printf("[bosskg-debug] <<< ResData (decrypted): %s", string(plain))
+		}
 	}
 
 	if respMsg.ResCode != "" && respMsg.ResCode != "0000" {
@@ -185,19 +210,29 @@ func (c *Client) Do(ctx context.Context, funCode FunCode, req any, out any) (*Re
 	return &respMsg, nil
 }
 
-func (c *Client) post(ctx context.Context, msg *ReqMessage) ([]byte, error) {
+func (c *Client) post(ctx context.Context, msg *ReqMessage) (*resty.Response, error) {
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	headers := http.Header{
+		"Content-Type": {"application/json;charset=UTF-8"},
+	}
+	if c.userAgent != "" {
+		headers.Set("User-Agent", c.userAgent)
+	}
+
+	if c.debug {
+		log.Printf("[bosskg-debug] >>> URL: POST %s", c.baseURL)
+		log.Printf("[bosskg-debug] >>> Request Headers: %v", headers)
+		log.Printf("[bosskg-debug] >>> Request Body: %s", string(b))
+	}
+
 	r := c.restyClient.R().
 		SetContext(ctx).
-		SetHeader("Content-Type", "application/json;charset=UTF-8").
+		SetHeaderMultiValues(headers).
 		SetBody(b)
-	if c.userAgent != "" {
-		r.SetHeader("User-Agent", c.userAgent)
-	}
 
 	resp, err := r.Post(c.baseURL)
 	if err != nil {
@@ -206,5 +241,5 @@ func (c *Client) post(ctx context.Context, msg *ReqMessage) ([]byte, error) {
 	if resp.StatusCode() != 200 {
 		return nil, fmt.Errorf("http status=%d body=%s", resp.StatusCode(), string(resp.Body()))
 	}
-	return resp.Body(), nil
+	return resp, nil
 }
